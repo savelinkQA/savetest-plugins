@@ -1,0 +1,20 @@
+{
+  "name": "python-parser",
+  "version": "1.0.0",
+  "display_name": "Python Parser",
+  "description": "Парсер для Python тестов (pytest, unittest, nose)",
+  "language": "python",
+  "supported_extensions": [".py"],
+  "file_patterns": ["**/test_*.py", "**/*_test.py", "**/Test*.py"],
+  "api_version": "1.0",
+  "endpoints": {
+    "parse": "/parse",
+    "can_parse": "/can_parse",
+    "health": "/health"
+  },
+  "config": {
+    "port": 8000,
+    "timeout": 30
+  }
+}
+

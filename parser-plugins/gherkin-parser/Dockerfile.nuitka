@@ -1,0 +1,72 @@
+FROM python:3.11-slim as builder
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    g++ \
+    git \
+    curl \
+    ccache \
+    patchelf \
+    chrpath \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir nuitka ordered-set
+
+COPY base_parser.py /app/
+COPY plugin.json /app/
+COPY src/ /app/src/
+
+RUN --mount=type=cache,target=/root/.ccache \
+    python -m nuitka \
+    --standalone \
+    --onefile \
+    --follow-imports \
+    --include-package=fastapi \
+    --include-package=uvicorn \
+    --include-package=pydantic \
+    --include-package=pydantic_core \
+    --include-package=re \
+    --include-module=base_parser \
+    --include-data-file=plugin.json=plugin.json \
+    --nofollow-import-to=pytest \
+    --nofollow-import-to=setuptools \
+    --nofollow-import-to=distutils \
+    --enable-plugin=anti-bloat \
+    --assume-yes-for-downloads \
+    --output-dir=/build \
+    src/parser.py \
+    && ls -la /build/
+
+
+FROM python:3.11-slim as runner
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/parser.dist /app/compiled
+COPY --from=builder /app/plugin.json /app/compiled/plugin.json
+COPY --from=builder /app/plugin.json /app/plugin.json
+
+RUN mkdir -p /app/git_repos \
+    && chown -R 65532:65532 /app
+
+WORKDIR /app
+
+EXPOSE 8000
+
+ENV LD_LIBRARY_PATH=/app/compiled:$LD_LIBRARY_PATH
+
+CMD ["/app/compiled/parser.bin"]
+

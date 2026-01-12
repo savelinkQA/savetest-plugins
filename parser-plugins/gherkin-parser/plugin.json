@@ -1,0 +1,20 @@
+{
+  "name": "gherkin-parser",
+  "version": "1.0.0",
+  "display_name": "Gherkin Parser",
+  "description": "Парсер для Gherkin файлов (Cucumber, Behave)",
+  "language": "gherkin",
+  "supported_extensions": [".feature"],
+  "file_patterns": ["**/*.feature"],
+  "api_version": "1.0",
+  "endpoints": {
+    "parse": "/parse",
+    "can_parse": "/can_parse",
+    "health": "/health"
+  },
+  "config": {
+    "port": 8000,
+    "timeout": 30
+  }
+}
+
