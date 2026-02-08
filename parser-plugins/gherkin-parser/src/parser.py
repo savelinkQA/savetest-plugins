@@ -125,7 +125,6 @@ class GherkinParser(BaseParser):
                 metadata = self._extract_from_tags(tags, feature_suite_id, feature_suite_name, scenario_name, file_path)
                 
                 if metadata:
-                    description_lines = []
                     steps_list = []
                     k = i + 1
                     examples_start = None
@@ -133,7 +132,6 @@ class GherkinParser(BaseParser):
                     while k < len(lines):
                         step_line = lines[k].strip()
                         if step_line.startswith(('Given', 'When', 'Then', 'And', 'But')):
-                            description_lines.append(step_line)
                             steps_list.append({
                                 'action': step_line,
                                 'expected_result': ''
@@ -154,9 +152,6 @@ class GherkinParser(BaseParser):
                             break
                         else:
                             k += 1
-                    
-                    if description_lines and not metadata.description:
-                        metadata.description = '\n'.join(description_lines[:5])
                     
                     metadata.steps = steps_list
                     
