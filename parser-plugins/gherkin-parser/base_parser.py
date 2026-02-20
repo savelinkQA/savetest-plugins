@@ -3,6 +3,7 @@
 Копия из save-test-backend/app/utils/parsers/base.py для использования в плагине.
 """
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,6 +67,16 @@ class TestMetadata:
     
     # Итерации (параметризация теста)
     iterations: List[Dict[str, Any]] = field(default_factory=list)
+    
+    # Suite-level метаданные из savetest-комментариев (# savetest_*)
+    suite_status: Optional[str] = None
+    suite_description: Optional[str] = None
+    suite_author: Optional[str] = None
+    suite_created_at: Optional[str] = None
+    
+    # Case-level метаданные из savetest-комментариев (# savetest_case_*)
+    estimated_time: Optional[str] = None
+    custom_fields: List[Dict[str, Any]] = field(default_factory=list)
     
     def validate(self) -> None:
         """
@@ -133,7 +144,13 @@ class TestMetadata:
             'tags': self.tags,
             'links': self.links,
             'steps': self.steps,
-            'iterations': self.iterations
+            'iterations': self.iterations,
+            'suite_status': self.suite_status,
+            'suite_description': self.suite_description,
+            'suite_author': self.suite_author,
+            'suite_created_at': self.suite_created_at,
+            'estimated_time': self.estimated_time,
+            'custom_fields': self.custom_fields,
         }
 
 
@@ -181,6 +198,65 @@ class BaseParser(ABC):
             return severity_lower
         else:
             return 'normal'
+    
+    def _parse_savetest_comments(self, lines: List[str]) -> Dict[str, str]:
+        """
+        Читает savetest_* комментарии из начала файла.
+        Останавливается на первой непустой и не-комментарийной строке.
+        Возвращает dict с ключами: status, author, description, created_at и др.
+        """
+        result: Dict[str, str] = {}
+        for line in lines:
+            stripped = line.strip()
+            if stripped == '':
+                continue
+            if not stripped.startswith('#'):
+                break
+            m = re.match(r'^#\s*savetest_(\w+):\s*(.+)$', stripped)
+            if m:
+                key = m.group(1)
+                val = m.group(2).strip().replace('\\n', '\n')
+                result[key] = val
+        return result
+    
+    def _extract_case_savetest_comments(self, comment_lines: List[str]) -> Dict[str, str]:
+        """
+        Извлекает savetest_case_* метаданные (одиночные) из списка комментариев.
+        Возвращает dict с ключами без префикса 'case_': estimated_time, description и др.
+        Повторяющиеся ключи (напр. custom_field) не включаются — используйте _extract_case_custom_fields.
+        """
+        result: Dict[str, str] = {}
+        for line in comment_lines:
+            stripped = line.strip()
+            m = re.match(r'^#\s*savetest_case_(\w+):\s*(.+)$', stripped)
+            if m:
+                key = m.group(1)
+                if key == 'custom_field':
+                    continue  # обрабатывается отдельно
+                val = m.group(2).strip().replace('\\n', '\n')
+                result[key] = val
+        return result
+
+    def _extract_case_custom_fields(self, comment_lines: List[str]) -> List[Dict[str, Any]]:
+        """
+        Извлекает кастомные поля из savetest_case_custom_field: Name|Value комментариев.
+        Возвращает список {'name': ..., 'value': ...}.
+        """
+        fields = []
+        for line in comment_lines:
+            stripped = line.strip()
+            m = re.match(r'^#\s*savetest_case_custom_field:\s*(.+)$', stripped)
+            if m:
+                raw = m.group(1).strip()
+                pipe_idx = raw.find('|')
+                if pipe_idx < 0:
+                    fields.append({'name': raw, 'value': ''})
+                else:
+                    fields.append({
+                        'name': raw[:pipe_idx],
+                        'value': raw[pipe_idx + 1:].replace('\\n', '\n')
+                    })
+        return fields
     
     def _validate_and_process_metadata(self, metadata_list: List[TestMetadata], file_path: Path) -> List[TestMetadata]:
         """Валидация и обработка списка метаданных."""

@@ -90,6 +90,9 @@ class GherkinParser(BaseParser):
         metadata_list = []
         lines = content.split('\n')
         
+        # Читаем suite-level savetest-комментарии из начала файла
+        suite_meta = self._parse_savetest_comments(lines)
+        
         feature_suite_id = None
         feature_suite_name = None
         
@@ -109,20 +112,32 @@ class GherkinParser(BaseParser):
             
             if line.startswith(('Scenario:', 'Scenario Outline:')):
                 tags = []
+                case_comment_lines = []
                 j = i - 1
                 while j >= 0:
                     prev_line = lines[j].strip()
                     if prev_line.startswith('@'):
                         tags.insert(0, prev_line)
                         j -= 1
-                    elif prev_line == '' or prev_line.startswith('#'):
+                    elif prev_line == '':
+                        j -= 1
+                    elif prev_line.startswith('#'):
+                        # Собираем savetest_case_* комментарии
+                        case_comment_lines.insert(0, prev_line)
                         j -= 1
                     else:
                         break
                 
                 scenario_name = line.split(':', 1)[1].strip() if ':' in line else ''
                 
-                metadata = self._extract_from_tags(tags, feature_suite_id, feature_suite_name, scenario_name, file_path)
+                # Извлекаем case-level метаданные из собранных комментариев
+                case_meta = self._extract_case_savetest_comments(case_comment_lines)
+                case_custom_fields = self._extract_case_custom_fields(case_comment_lines)
+                
+                metadata = self._extract_from_tags(
+                    tags, feature_suite_id, feature_suite_name,
+                    scenario_name, file_path, suite_meta, case_meta, case_custom_fields
+                )
                 
                 if metadata:
                     steps_list = []
@@ -143,7 +158,14 @@ class GherkinParser(BaseParser):
                             k += 1
                         elif step_line.startswith(('Examples:', 'Example:')):
                             examples_start = k
-                            break
+                            k += 1
+                            # Пропускаем блок Examples (таблица до первой не-| строки), чтобы собрать шаги после него
+                            while k < len(lines):
+                                next_line = lines[k].strip()
+                                if next_line.startswith('|') or next_line == '' or next_line.startswith('#'):
+                                    k += 1
+                                else:
+                                    break
                         elif step_line.startswith(('Scenarios:', 'Scenario:')):
                             break
                         elif step_line.startswith('@'):
@@ -171,9 +193,12 @@ class GherkinParser(BaseParser):
         feature_suite_id: Optional[str],
         feature_suite_name: Optional[str],
         scenario_name: str,
-        file_path: str
+        file_path: str,
+        suite_meta: Optional[Dict[str, str]] = None,
+        case_meta: Optional[Dict[str, str]] = None,
+        case_custom_fields: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[TestMetadata]:
-        """Извлекает метаданные из списка тегов"""
+        """Извлекает метаданные из списка тегов и savetest-комментариев"""
         all_tags_text = ' '.join(tags)
         
         tms_match = self.TAG_PATTERNS['tms'].search(all_tags_text)
@@ -217,18 +242,28 @@ class GherkinParser(BaseParser):
                     'value': link
                 })
         
+        suite_meta = suite_meta or {}
+        case_meta = case_meta or {}
+        case_custom_fields = case_custom_fields or []
+        
         return TestMetadata(
             tms=tms_value,
             file_path=file_path,
             suite_id=suite_id,
             suite_name=suite_name,
             title=scenario_name,
-            description=None,
+            description=case_meta.get('description'),
             function_name=scenario_name,
             severity=severity_value,
             priority=priority_value,
             tags=tags_list,
-            links=links_list
+            links=links_list,
+            suite_status=suite_meta.get('status'),
+            suite_description=suite_meta.get('description'),
+            suite_author=suite_meta.get('author'),
+            suite_created_at=suite_meta.get('created_at'),
+            estimated_time=case_meta.get('estimated_time'),
+            custom_fields=case_custom_fields,
         )
     
     def _extract_iterations_from_examples(self, lines: List[str], examples_start: int) -> List[Dict[str, Any]]:
