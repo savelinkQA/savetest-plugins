@@ -96,37 +96,70 @@ class PythonParser(BaseParser):
         # Читаем suite-level savetest-комментарии из начала файла (по исходным строкам)
         source_lines = source.split('\n')
         suite_meta = self._parse_savetest_comments(source_lines)
-        
+
+        # Собираем модульные переменные вида  name = "literal"
+        # Они используются как аргументы декораторов: @allure.feature(feature)
+        module_vars = self._collect_module_vars(tree)
+
         metadata_list = []
-        
+
         for node in tree.body:
             if isinstance(node, ast.ClassDef):
                 suite_id = self._get_suite_id_from_class(node)
-                suite_name = self._get_suite_name_from_class(node)
-                
+                suite_name = self._get_suite_name_from_class(node, module_vars)
+
                 for item in node.body:
                     if isinstance(item, ast.FunctionDef):
                         is_test = item.name.startswith('test_') or self._has_test_decorator(item)
                         if is_test:
                             metadata = self._extract_from_function(
                                 item, str(file_path), suite_id, suite_name,
-                                source_lines=source_lines, suite_meta=suite_meta
+                                source_lines=source_lines, suite_meta=suite_meta,
+                                module_vars=module_vars,
                             )
                             if metadata:
                                 metadata_list.append(metadata)
-            
+
             elif isinstance(node, ast.FunctionDef):
                 is_test = node.name.startswith('test_') or self._has_test_decorator(node)
                 if is_test:
                     metadata = self._extract_from_function(
                         node, str(file_path), None, None,
-                        source_lines=source_lines, suite_meta=suite_meta
+                        source_lines=source_lines, suite_meta=suite_meta,
+                        module_vars=module_vars,
                     )
                     if metadata:
                         metadata_list.append(metadata)
         
         return self._validate_and_process_metadata(metadata_list, file_path)
     
+    def _collect_module_vars(self, tree: ast.Module) -> Dict[str, str]:
+        """
+        Собирает модульные переменные вида  name = "literal string"
+        из верхнего уровня модуля.
+
+        Например:
+            feature = "CancelAttachmentCommand"
+            story   = "Позитивные"
+
+        Это позволяет разворачивать переменные, переданные в декораторы:
+            @allure.feature(feature)  →  "CancelAttachmentCommand"
+        """
+        result: Dict[str, str] = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        value = self._extract_string_value(node.value)
+                        if value is not None:
+                            result[target.id] = value
+            elif isinstance(node, ast.AnnAssign):
+                if isinstance(node.target, ast.Name) and node.value:
+                    value = self._extract_string_value(node.value)
+                    if value is not None:
+                        result[node.target.id] = value
+        return result
+
     def _get_suite_id_from_class(self, class_node: ast.ClassDef) -> Optional[str]:
         """Извлекает suite_id из @allure.suite() декоратора класса"""
         for decorator in class_node.decorator_list:
@@ -136,16 +169,59 @@ class PythonParser(BaseParser):
                 if decorator_name == 'allure.suite':
                     return decorator_args.get('value')
         return None
-    
-    def _get_suite_name_from_class(self, class_node: ast.ClassDef) -> Optional[str]:
-        """Извлекает suite_name из @allure.story() декоратора класса"""
-        for decorator in class_node.decorator_list:
-            decorator_info = self._parse_decorator(decorator)
-            if decorator_info:
-                decorator_name, decorator_args = decorator_info
-                if decorator_name == 'allure.story':
-                    return decorator_args.get('value')
-        return None
+
+    def _get_suite_name_from_class(
+        self,
+        class_node: ast.ClassDef,
+        module_vars: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """
+        Формирует suite_name по правилу: allure.feature + '.' + allure.story.
+
+        Порядок поиска feature/story:
+          1. Декораторы класса.
+          2. Декораторы первого тест-метода класса (если на классе ничего нет).
+
+        Аргументы декораторов могут быть строками или ссылками на модульные
+        переменные — module_vars используется для их разворачивания.
+
+        Если ни feature, ни story не найдены — возвращает имя класса.
+        Если найдено что-то одно — возвращает его без точки.
+        """
+        feature, story = self._extract_feature_story(class_node.decorator_list, module_vars)
+
+        if not feature and not story:
+            for item in class_node.body:
+                if isinstance(item, ast.FunctionDef) and (
+                    item.name.startswith('test_') or self._has_test_decorator(item)
+                ):
+                    feature, story = self._extract_feature_story(item.decorator_list, module_vars)
+                    if feature or story:
+                        break
+
+        parts = [p for p in [feature, story] if p]
+        if parts:
+            return '.'.join(parts)
+        return class_node.name
+
+    def _extract_feature_story(
+        self,
+        decorator_list,
+        module_vars: Optional[Dict[str, str]] = None,
+    ) -> tuple:
+        """Извлекает (feature, story) из списка декораторов."""
+        feature = None
+        story = None
+        for decorator in decorator_list:
+            info = self._parse_decorator(decorator, module_vars=module_vars)
+            if not info:
+                continue
+            name, args = info
+            if name == 'allure.feature':
+                feature = args.get('value')
+            elif name == 'allure.story':
+                story = args.get('value')
+        return feature, story
     
     def _has_test_decorator(self, node: ast.FunctionDef) -> bool:
         """Проверяет, есть ли у функции декораторы тестовых фреймворков"""
@@ -156,13 +232,14 @@ class PythonParser(BaseParser):
         return False
     
     def _extract_from_function(
-        self, 
-        func_node: ast.FunctionDef, 
+        self,
+        func_node: ast.FunctionDef,
         file_path: str,
         suite_id: Optional[str],
         suite_name: Optional[str],
         source_lines: Optional[List[str]] = None,
         suite_meta: Optional[Dict[str, str]] = None,
+        module_vars: Optional[Dict[str, str]] = None,
     ) -> Optional[TestMetadata]:
         """Извлекает метаданные из декораторов функции и savetest-комментариев"""
         tms_value = None
@@ -173,15 +250,15 @@ class PythonParser(BaseParser):
         tags_list = []
         links_list = []
         iterations_list = []
-        
+
         for decorator in func_node.decorator_list:
             parametrize_info = self._extract_parametrize(decorator)
             if parametrize_info:
                 iterations_list.extend(parametrize_info)
                 continue
-            
-            decorator_info = self._parse_decorator(decorator)
-            
+
+            decorator_info = self._parse_decorator(decorator, module_vars=module_vars)
+
             if not decorator_info:
                 continue
             
@@ -280,39 +357,47 @@ class PythonParser(BaseParser):
                 break
         return result
     
-    def _parse_decorator(self, decorator) -> Optional[tuple]:
-        """Парсит декоратор и возвращает (имя, аргументы)"""
+    def _parse_decorator(
+        self,
+        decorator,
+        module_vars: Optional[Dict[str, str]] = None,
+    ) -> Optional[tuple]:
+        """Парсит декоратор и возвращает (имя, аргументы).
+
+        module_vars используется для разворачивания переменных в аргументах:
+            @allure.feature(feature)  →  feature берётся из module_vars
+        """
         try:
             decorator_name = self._get_decorator_name(decorator)
-            
+
             if not decorator_name:
                 return None
-            
+
             if not decorator_name.startswith('allure.'):
                 return None
-            
+
             args = {}
-            
+
             if isinstance(decorator, ast.Call):
                 if decorator.args:
                     values = []
                     for arg in decorator.args:
-                        value = self._extract_static_value(arg)
+                        value = self._extract_static_value(arg, module_vars)
                         if value is not None:
                             values.append(value)
-                    
+
                     if len(values) == 1:
                         args['value'] = values[0]
                     elif len(values) > 1:
                         args['values'] = values
-                
+
                 for keyword in decorator.keywords:
-                    value = self._extract_static_value(keyword.value)
+                    value = self._extract_static_value(keyword.value, module_vars)
                     if value is not None:
                         args[keyword.arg] = value
-            
+
             return (decorator_name, args)
-        
+
         except Exception:
             return None
     
@@ -336,8 +421,16 @@ class PythonParser(BaseParser):
             pass
         return None
     
-    def _extract_static_value(self, node) -> Optional[str]:
-        """Извлекает статическое значение из AST узла"""
+    def _extract_static_value(
+        self,
+        node,
+        module_vars: Optional[Dict[str, str]] = None,
+    ) -> Optional[str]:
+        """Извлекает статическое значение из AST узла.
+
+        Если node — переменная (ast.Name) и module_vars передан,
+        пытается разрешить её значение из модульных переменных.
+        """
         try:
             if isinstance(node, ast.Constant):
                 return str(node.value)
@@ -345,6 +438,9 @@ class PythonParser(BaseParser):
                 return node.s
             elif isinstance(node, ast.Num):
                 return str(node.n)
+            elif isinstance(node, ast.Name):
+                if module_vars and node.id in module_vars:
+                    return module_vars[node.id]
             elif isinstance(node, ast.Attribute):
                 if isinstance(node.value, ast.Attribute) or isinstance(node.value, ast.Name):
                     return node.attr.lower()
