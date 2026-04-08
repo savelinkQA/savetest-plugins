@@ -43,6 +43,9 @@ class TestMetadata:
     # Suite информация
     suite_id: Optional[str] = None  # GUID test suite
     suite_name: Optional[str] = None
+    # Путь к сущности сьюта: для ReadyAPI — директория сьюта, для Python/Gherkin — файл с тестами.
+    # Используется бэкендом для определения правильного уровня вложенности директорий.
+    suite_path: Optional[str] = None
     
     # Дополнительные поля
     title: Optional[str] = None
@@ -129,6 +132,7 @@ class TestMetadata:
             'file_path': self.file_path,
             'suite_id': self.suite_id,
             'suite_name': self.suite_name,
+            'suite_path': self.suite_path,
             'title': self.title,
             'description': self.description,
             'function_name': self.function_name,
@@ -183,80 +187,11 @@ class BaseParser(ABC):
         """
         pass
     
-    def _map_severity_to_priority(self, severity: str) -> str:
-        """Маппинг severity -> priority"""
-        severity_lower = severity.lower()
-        
-        if severity_lower in ['blocker', 'critical', 'normal', 'minor', 'trivial']:
-            return severity_lower
-        else:
-            return 'normal'
-    
-    def _parse_savetest_comments(self, lines: List[str]) -> Dict[str, str]:
-        """
-        Читает savetest_* комментарии из начала файла.
-        Останавливается на первой непустой и не-комментарийной строке.
-        Возвращает dict с ключами: status, author, description, created_at и др.
-        """
-        result: Dict[str, str] = {}
-        for line in lines:
-            stripped = line.strip()
-            if stripped == '':
-                continue
-            if not stripped.startswith('#'):
-                break
-            m = re.match(r'^#\s*savetest_(\w+):\s*(.+)$', stripped)
-            if m:
-                key = m.group(1)
-                val = m.group(2).strip().replace('\\n', '\n')
-                result[key] = val
-        return result
-    
-    def _extract_case_savetest_comments(self, comment_lines: List[str]) -> Dict[str, str]:
-        """
-        Извлекает savetest_case_* метаданные (одиночные) из списка комментариев.
-        Возвращает dict с ключами без префикса 'case_': estimated_time, description и др.
-        Повторяющиеся ключи (напр. custom_field) не включаются — используйте _extract_case_custom_fields.
-        """
-        result: Dict[str, str] = {}
-        for line in comment_lines:
-            stripped = line.strip()
-            m = re.match(r'^#\s*savetest_case_(\w+):\s*(.+)$', stripped)
-            if m:
-                key = m.group(1)
-                if key == 'custom_field':
-                    continue  # обрабатывается отдельно
-                val = m.group(2).strip().replace('\\n', '\n')
-                result[key] = val
-        return result
-
-    def _extract_case_custom_fields(self, comment_lines: List[str]) -> List[Dict[str, Any]]:
-        """
-        Извлекает кастомные поля из savetest_case_custom_field: Name|Value комментариев.
-        Возвращает список {'name': ..., 'value': ...}.
-        """
-        fields = []
-        for line in comment_lines:
-            stripped = line.strip()
-            m = re.match(r'^#\s*savetest_case_custom_field:\s*(.+)$', stripped)
-            if m:
-                raw = m.group(1).strip()
-                pipe_idx = raw.find('|')
-                if pipe_idx < 0:
-                    fields.append({'name': raw, 'value': ''})
-                else:
-                    fields.append({
-                        'name': raw[:pipe_idx],
-                        'value': raw[pipe_idx + 1:].replace('\\n', '\n')
-                    })
-        return fields
-    
     def _validate_and_process_metadata(self, metadata_list: List[TestMetadata], file_path: Path) -> List[TestMetadata]:
         """Валидация и обработка списка метаданных."""
         if not metadata_list:
             return []
         
-        # Валидация каждого элемента
         errors = []
         for i, metadata in enumerate(metadata_list):
             try:
@@ -269,7 +204,6 @@ class BaseParser(ABC):
                 f"Ошибки валидации в файле {file_path}:\n" + "\n".join(errors)
             )
         
-        # Проверка дубликатов case_id внутри файла
         case_ids = [m.tms for m in metadata_list]
         duplicates = [cid for cid in case_ids if case_ids.count(cid) > 1]
         if duplicates:

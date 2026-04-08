@@ -1,11 +1,11 @@
 {
-  "name": "python-parser",
+  "name": "readyapi-composite-parser",
   "version": "1.1.0",
-  "display_name": "Python Parser",
-  "description": "parser for python test (pytest)",
-  "language": "python",
-  "supported_extensions": [".py"],
-  "file_patterns": ["**/test_*.py", "**/*_test.py", "**/Test*.py"],
+  "display_name": "ReadyAPI Composite Parser",
+  "description": "Parser for ReadyAPI/SoapUI composite project test cases (XML)",
+  "language": "readyapi",
+  "supported_extensions": [".xml"],
+  "file_patterns": ["**/*.xml"],
   "api_version": "1.1",
   "endpoints": {
     "parse": "/parse",
@@ -20,4 +20,3 @@
     "repo_timeout": 600
   }
 }
-

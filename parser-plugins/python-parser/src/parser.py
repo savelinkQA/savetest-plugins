@@ -34,6 +34,12 @@ class ParseRequest(BaseModel):
     repo_path: Optional[str] = None
 
 
+class ParseRepoRequest(BaseModel):
+    """Запрос на парсинг всего репозитория"""
+    repo_path: str
+    file_paths: Optional[List[str]] = None
+
+
 class CanParseRequest(BaseModel):
     """Запрос на проверку возможности парсинга"""
     file_path: str
@@ -44,6 +50,15 @@ class ParseResponse(BaseModel):
     success: bool
     metadata: List[Dict[str, Any]]
     error: Optional[str] = None
+
+
+class ParseRepoResponse(BaseModel):
+    """Ответ на парсинг всего репозитория"""
+    success: bool
+    metadata: List[Dict[str, Any]]
+    errors: List[str] = []
+    files_processed: int = 0
+    files_failed: int = 0
 
 
 class CanParseResponse(BaseModel):
@@ -260,8 +275,14 @@ class PythonParser(BaseParser):
             decorator_info = self._parse_decorator(decorator, module_vars=module_vars)
 
             if not decorator_info:
+                # Обработка pytest.mark.* (например @pytest.mark.manual)
+                decorator_name = self._get_decorator_name(decorator)
+                if decorator_name and decorator_name.startswith('pytest.mark.'):
+                    parts = decorator_name.split('.')
+                    if len(parts) >= 3 and parts[2] != 'parametrize':
+                        tags_list.append(parts[2])
                 continue
-            
+
             decorator_name, decorator_args = decorator_info
             
             if decorator_name == 'allure.testcase':
@@ -277,8 +298,11 @@ class PythonParser(BaseParser):
                     priority_value = self._map_severity_to_priority(severity)
             elif decorator_name == 'allure.tag':
                 values = decorator_args.get('values', [])
+                value = decorator_args.get('value')
                 if values:
                     tags_list.extend(values)
+                elif value:
+                    tags_list.append(value)
             elif decorator_name == 'allure.issue':
                 issue = decorator_args.get('value')
                 if issue:
@@ -315,6 +339,9 @@ class PythonParser(BaseParser):
         
         steps = self._extract_steps_from_function(func_node)
         
+        # Сохраняем только уникальные теги (порядок первого вхождения)
+        unique_tags = list(dict.fromkeys(tags_list))
+        
         return TestMetadata(
             tms=tms_value,
             file_path=file_path,
@@ -325,7 +352,7 @@ class PythonParser(BaseParser):
             function_name=func_node.name,
             severity=severity_value,
             priority=priority_value,
-            tags=tags_list,
+            tags=unique_tags,
             links=links_list,
             steps=steps,
             iterations=iterations_list,
@@ -769,6 +796,76 @@ async def parse_file(request: ParseRequest):
     except Exception as e:
         logger.error(f"Неожиданная ошибка: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/parse_repo", response_model=ParseRepoResponse)
+async def parse_repo(request: ParseRepoRequest):
+    """
+    Парсит весь репозиторий за один вызов.
+
+    Принимает путь к репозиторию и опциональный список файлов.
+    Если file_paths не передан — плагин сам находит все подходящие файлы
+    по паттернам Python-тестов.
+
+    Дубликаты case_id между файлами фиксируются в поле errors,
+    но обработка продолжается (дубликат не включается в metadata).
+    """
+    repo_path = Path(request.repo_path)
+    if not repo_path.exists():
+        return ParseRepoResponse(
+            success=False,
+            metadata=[],
+            errors=[f"repo_path не найден: {repo_path}"],
+        )
+
+    if request.file_paths is not None:
+        file_paths = [Path(fp) for fp in request.file_paths]
+    else:
+        patterns = ["test_*.py", "*_test.py", "Test*.py"]
+        file_paths = []
+        for pat in patterns:
+            for f in repo_path.rglob(pat):
+                try:
+                    rel = str(f.relative_to(repo_path))
+                    if rel.startswith("docs/") or "/docs/" in rel:
+                        continue
+                    file_paths.append(f)
+                except Exception:
+                    pass
+        file_paths = sorted(set(file_paths))
+
+    all_raw = []
+    errors: List[str] = []
+    files_processed = 0
+    files_failed = 0
+
+    for file_path in file_paths:
+        try:
+            if not file_path.exists():
+                errors.append(f"Файл не найден: {file_path}")
+                files_failed += 1
+                continue
+            metadata_list = parser.parse_file(file_path)
+            all_raw.extend(metadata_list)
+            files_processed += 1
+        except (ParserError, ParserValidationError) as e:
+            errors.append(f"{file_path}: {e}")
+            files_failed += 1
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при parse_repo для {file_path}: {e}")
+            errors.append(f"{file_path}: неожиданная ошибка — {e}")
+            files_failed += 1
+
+    clean, dup_errors = parser.check_cross_file_duplicates(all_raw)
+    errors.extend(dup_errors)
+
+    return ParseRepoResponse(
+        success=files_failed == 0 and not dup_errors,
+        metadata=[m.to_dict() for m in clean],
+        errors=errors,
+        files_processed=files_processed,
+        files_failed=files_failed,
+    )
 
 
 @app.post("/can_parse", response_model=CanParseResponse)

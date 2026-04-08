@@ -30,6 +30,12 @@ class ParseRequest(BaseModel):
     repo_path: Optional[str] = None
 
 
+class ParseRepoRequest(BaseModel):
+    """Запрос на парсинг всего репозитория"""
+    repo_path: str
+    file_paths: Optional[List[str]] = None
+
+
 class CanParseRequest(BaseModel):
     """Запрос на проверку возможности парсинга"""
     file_path: str
@@ -40,6 +46,15 @@ class ParseResponse(BaseModel):
     success: bool
     metadata: List[Dict[str, Any]]
     error: Optional[str] = None
+
+
+class ParseRepoResponse(BaseModel):
+    """Ответ на парсинг всего репозитория"""
+    success: bool
+    metadata: List[Dict[str, Any]]
+    errors: List[str] = []
+    files_processed: int = 0
+    files_failed: int = 0
 
 
 class CanParseResponse(BaseModel):
@@ -223,7 +238,7 @@ class GherkinParser(BaseParser):
             priority_value = self._map_severity_to_priority(severity)
         
         tag_matches = self.TAG_PATTERNS['tag'].findall(all_tags_text)
-        tags_list = tag_matches if tag_matches else []
+        tags_list = list(dict.fromkeys(tag_matches)) if tag_matches else []
         
         links_list = []
         issue_matches = self.TAG_PATTERNS['issue'].findall(all_tags_text)
@@ -352,6 +367,73 @@ async def parse_file(request: ParseRequest):
     except Exception as e:
         logger.error(f"Неожиданная ошибка: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/parse_repo", response_model=ParseRepoResponse)
+async def parse_repo(request: ParseRepoRequest):
+    """
+    Парсит весь репозиторий за один вызов.
+
+    Принимает путь к репозиторию и опциональный список файлов.
+    Если file_paths не передан — плагин сам находит все .feature файлы.
+
+    Дубликаты case_id между файлами фиксируются в поле errors,
+    но обработка продолжается (дубликат не включается в metadata).
+    """
+    repo_path = Path(request.repo_path)
+    if not repo_path.exists():
+        return ParseRepoResponse(
+            success=False,
+            metadata=[],
+            errors=[f"repo_path не найден: {repo_path}"],
+        )
+
+    if request.file_paths is not None:
+        file_paths = [Path(fp) for fp in request.file_paths]
+    else:
+        file_paths = []
+        for f in repo_path.rglob("*.feature"):
+            try:
+                rel = str(f.relative_to(repo_path))
+                if rel.startswith("docs/") or "/docs/" in rel:
+                    continue
+                file_paths.append(f)
+            except Exception:
+                pass
+        file_paths = sorted(file_paths)
+
+    all_raw = []
+    errors: List[str] = []
+    files_processed = 0
+    files_failed = 0
+
+    for file_path in file_paths:
+        try:
+            if not file_path.exists():
+                errors.append(f"Файл не найден: {file_path}")
+                files_failed += 1
+                continue
+            metadata_list = parser.parse_file(file_path)
+            all_raw.extend(metadata_list)
+            files_processed += 1
+        except (ParserError, ParserValidationError) as e:
+            errors.append(f"{file_path}: {e}")
+            files_failed += 1
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при parse_repo для {file_path}: {e}")
+            errors.append(f"{file_path}: неожиданная ошибка — {e}")
+            files_failed += 1
+
+    clean, dup_errors = parser.check_cross_file_duplicates(all_raw)
+    errors.extend(dup_errors)
+
+    return ParseRepoResponse(
+        success=files_failed == 0 and not dup_errors,
+        metadata=[m.to_dict() for m in clean],
+        errors=errors,
+        files_processed=files_processed,
+        files_failed=files_failed,
+    )
 
 
 @app.post("/can_parse", response_model=CanParseResponse)

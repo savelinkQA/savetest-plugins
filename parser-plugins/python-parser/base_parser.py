@@ -24,13 +24,6 @@ class ParserValidationError(ParserError):
     pass
 
 
-class TestLanguage(str, Enum):
-    """Поддерживаемые языки тестов"""
-    PYTHON = "python"
-    JAVA = "java"
-    GHERKIN = "gherkin"
-
-
 class AllureSeverity(str, Enum):
     """Уровни важности Allure"""
     BLOCKER = "blocker"
@@ -285,4 +278,33 @@ class BaseParser(ABC):
             )
         
         return metadata_list
+
+    @staticmethod
+    def check_cross_file_duplicates(
+        metadata_list: List["TestMetadata"],
+    ) -> tuple:
+        """
+        Проверяет дубликаты case_id среди метаданных из нескольких файлов.
+
+        Используется в /parse_repo endpoint для обнаружения дубликатов до
+        возврата результатов в экстрактор.
+
+        Returns:
+            (deduplicated_list, error_messages)
+        """
+        seen: Dict[str, str] = {}
+        clean = []
+        errors = []
+
+        for m in metadata_list:
+            if m.tms in seen:
+                errors.append(
+                    f"Дубликат case_id '{m.tms}': "
+                    f"{seen[m.tms]} и {m.file_path}"
+                )
+            else:
+                seen[m.tms] = m.file_path
+                clean.append(m)
+
+        return clean, errors
 
